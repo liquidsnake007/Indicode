@@ -1,0 +1,47 @@
+model_list:
+  # ─── GENERAL (document summaries, approval notes) ──────────
+  # LangGraph general node sends /no_think in system prompt for speed
+  - model_name: sovereign-general
+    litellm_params:
+      model: ollama/qwen3:8b
+      api_base: http://ollama:11434
+
+  # ─── CODER (agentic coding with reasoning) ────────────────
+  # Same model as general — LangGraph coder node sends /think
+  # for multi-step reasoning before code generation
+  - model_name: sovereign-coder
+    litellm_params:
+      model: ollama/qwen3:8b
+      api_base: http://ollama:11434
+
+  # ─── VISION (scanned docs, P&IDs, handwriting) ────────────
+  # Real model swap — qwen3:8b evicted, qwen3-vl:4b loads
+  - model_name: sovereign-vision
+    litellm_params:
+      model: ollama/qwen3-vl:4b
+      api_base: http://ollama:11434
+
+  # ─── GUARD (NeMo input/output rails) ──────────────────────
+  - model_name: sovereign-guard
+    litellm_params:
+      model: ollama/qwen3:1.7b
+      api_base: http://ollama:11434
+
+  # ─── EMBEDDINGS (Qdrant vector store) ──────────────────────
+  - model_name: sovereign-embed
+    litellm_params:
+      model: ollama/bge-m3
+      api_base: http://ollama:11434
+
+router_settings:
+  routing_strategy: simple-shuffle
+  num_retries: 2
+  timeout: 120
+  allowed_fails: 3
+  cooldown_time: 60
+
+litellm_settings:
+  drop_params: true
+
+general_settings:
+  master_key: REPLACE_WITH_YOUR_LOCAL_KEY

@@ -1,0 +1,27 @@
+STANDARD OPERATING PROCEDURE
+SOP-EA-2019-004
+Equipment Repair Approval Process
+
+1. SCOPE
+This SOP covers the approval process for major equipment repairs exceeding Rs. 5 lakh in cost or requiring more than 48 hours of downtime.
+
+2. RESPONSIBILITIES
+2.1 Equipment Inspector: Initiates the repair request with detailed findings and recommendations.
+2.2 Maintenance Engineer: Reviews technical feasibility and cost estimate.
+2.3 Plant Manager: Final approval for repairs under Rs. 50 lakh.
+2.4 Safety Officer: Mandatory co-sign for repairs involving pressure vessels or safety systems.
+
+3. PROCEDURE
+3.1 Inspector submits Equipment Inspection Report (Form IR-xx) with findings and recommendations.
+3.2 Maintenance Engineer prepares cost estimate and downtime analysis within 5 working days.
+3.3 Joint review meeting: Inspector, Maintenance Engineer, and Safety Officer (if applicable).
+3.4 Draft approval note prepared using template APPR-2024, including summary of findings, cost estimate, downtime impact, safety implications, and recommended action.
+3.5 Plant Manager reviews and signs. Safety Officer co-signs if pressure vessel involved.
+3.6 Approved note forwarded to Procurement for execution.
+
+4. DOCUMENTATION
+All approvals must reference the original inspection report number and be filed in the Equipment History file.
+
+5. REVISION HISTORY
+Rev 0: 2019-03-15, Initial issue
+Rev 1: 2021-06-20, Added Safety Officer co-sign requirement

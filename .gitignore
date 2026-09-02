@@ -1,0 +1,23 @@
+# ── SECRETS ──
+langfuse/.env
+langfuse-upstream/.env
+litellm/config.yaml
+
+# ── BIG / RUNTIME DATA (root-owned, container-generated) ──
+volumes/
+workspace/outputs/
+falco/pcap/
+falco/output/
+services/rag/flashrank_cache/
+
+# ── PYTHON ──
+__pycache__/
+*.pyc
+.venv/
+
+# ── PERSONAL NOTES ──
+notes.md
+notes.txt
+notes*.md
+phase*plan*.md
+phase*conc.md

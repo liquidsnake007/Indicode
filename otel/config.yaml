@@ -1,0 +1,31 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 100
+
+exporters:
+  otlphttp/langfuse:                       # otlpHTTP, not otlp
+    endpoint: http://langfuse-web:3000/api/public/otel
+    headers:
+      Authorization: "Basic ${env:LANGFUSE_BASIC_AUTH}"
+      x-langfuse-ingestion-version: "4"
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/langfuse]

@@ -1,0 +1,24 @@
+INTERNAL CORRESPONDENCE
+Ref: MAINT/2024/0347
+Date: 2 April 2024
+From: Maintenance Engineering Dept
+To: Procurement Dept
+CC: Plant Manager
+
+Subject: Tube Bundle Replacement - Heat Exchanger HX-301
+
+As per Inspection Report IR-2024-0178 dated 15 March 2024, the tube bundle of HX-301 requires replacement due to corrosion (12 tubes below minimum wall thickness).
+
+We have received the following quotations:
+1. M/s Thermal Solutions Pvt Ltd: Rs. 42.5 lakh, delivery 6 weeks
+2. M/s HeatEx Industries: Rs. 38.2 lakh, delivery 8 weeks
+3. M/s Process Equipment Co: Rs. 45.0 lakh, delivery 4 weeks
+
+Technical evaluation: All three suppliers meet our specification (ASME SA-179 tubes, 316L shell). HeatEx Industries offers the best price but longest delivery. Process Equipment Co offers fastest delivery at premium.
+
+Recommendation: M/s HeatEx Industries at Rs. 38.2 lakh, considering the 8-week delivery aligns with our next planned turnaround window (September 2024).
+
+Request Procurement to initiate purchase order process per SOP-EA-2019-004.
+
+R. Sharma
+Chief Maintenance Engineer

@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+qdrant-client==1.12.2
+openai
+flashrank
+python-multipart

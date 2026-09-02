@@ -1,0 +1,43 @@
+- list: sovereign_allowlist_cidr
+  items:
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
+    - "127.0.0.1"
+
+- macro: is_sovereign_allowlisted
+  condition: >
+    fd.sip in (sovereign_allowlist_cidr)
+
+- rule: Sovereign Egress Attempt
+  desc: Any outbound connect() to a non-RFC1918 destination
+  condition: >
+    evt.type=connect and evt.dir=< and fd.typechar=4
+    and not is_sovereign_allowlisted
+    and (container.name != "" or proc.name != "")
+  output: >
+    EGRESS_ATTEMPT
+    container=%container.name
+    proc=%proc.name
+    pid=%proc.pid
+    dest_ip=%fd.sip
+    dest_port=%fd.sport
+    proto=%fd.l4proto
+    timestamp=%evt.time
+  priority: WARNING
+  tags: [sovereignty, container, network]
+
+- rule: Sovereign Allowed Local Connection
+  desc: Inbound or internal connection (for the dashboard's "allowed" view)
+  condition: >
+    evt.type=accept and evt.dir=< and fd.typechar=4
+    and is_sovereign_allowlisted
+  output: >
+    ALLOWED_LOCAL
+    container=%container.name
+    src_ip=%fd.cip
+    dst_port=%fd.lport
+    proto=%fd.l4proto
+    timestamp=%evt.time
+  priority: INFORMATIONAL
+  tags: [sovereignty, container, network]

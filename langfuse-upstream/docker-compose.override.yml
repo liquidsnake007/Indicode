@@ -1,0 +1,9 @@
+services:
+  langfuse-web:
+    networks:
+      - default
+      - indicode-sovereign
+
+networks:
+  indicode-sovereign:
+    external: true
