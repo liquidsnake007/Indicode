@@ -7,8 +7,10 @@ Endpoints:
   GET  /health
 """
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
+import json
 import uuid
 
 from graph import build_agent_graph
@@ -153,6 +155,85 @@ async def get_state(thread_id: str):
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Thread not found: {e}")
 
+@app.post("/chat/stream")
+def chat_stream(req: ChatRequest):
+    """Stream agent progress as SSE. Uses a SYNC generator so FastAPI runs
+    it in a thread pool — this prevents the sync graph.stream() from blocking
+    the event loop and allows real-time token delivery."""
+    import json
+    thread_id = req.thread_id or str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit":15}
+
+    def event_generator():  # ← SYNC, not async
+        yield f"data: {json.dumps({'type': 'thread', 'thread_id': thread_id})}\n\n"
+
+        try:
+            for stream_event in agent_graph.stream(
+                {"messages": [("user", req.message)]},
+                config=config,
+                stream_mode=["updates", "custom"],
+            ):
+                mode, data = stream_event
+
+                # ── CUSTOM mode: ONLY reasoning tokens (from agent_reasoning) ──
+                if mode == "custom" and isinstance(data, dict):
+                    etype = data.get("type", "")
+                    if etype in ("reasoning_start", "reasoning", "reasoning_end"):
+                        yield f"data: {json.dumps(data)}\n\n"
+                    # Skip tool_call/final/error from custom — updates handles those
+
+                # ── UPDATES mode: node completion events ──
+                elif mode == "updates" and isinstance(data, dict):
+                    for node_name, node_output in data.items():
+                        if not isinstance(node_output, dict):
+                            continue
+
+                        if node_name == "classify":
+                            yield f"data: {json.dumps({'type': 'classified', 'task_type': node_output.get('task_type', 'unknown')})}\n\n"
+
+                        elif node_name == "parse":
+                            msgs = node_output.get("messages", [])
+                            if msgs:
+                                msg = msgs[-1]
+                                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                                    for tc in msg.tool_calls:
+                                        yield f"data: {json.dumps({'type': 'tool_call', 'tool': tc['name'], 'args_preview': str(tc.get('args', ''))[:300]})}\n\n"
+                                elif msg.content and not str(msg.content).startswith('{"'):
+                                    yield f"data: {json.dumps({'type': 'final', 'content': str(msg.content)})}\n\n"
+
+                        elif node_name == "tools":
+                            msgs = node_output.get("messages", [])
+                            for msg in msgs:
+                                if hasattr(msg, "content") and msg.content:
+                                    preview = str(msg.content)[:200]
+                                    yield f"data: {json.dumps({'type': 'tool_result', 'tool': 'tool', 'content_preview': preview})}\n\n"
+
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)[:500]})}\n\n"
+
+        # ── After stream: check for approval gate ──
+        try:
+            state = agent_graph.get_state(config)
+            if state.next and "approval" in (state.next or []):
+                if state.tasks:
+                    for task in state.tasks:
+                        if hasattr(task, "interrupts") and task.interrupts:
+                            intr = task.interrupts[0]
+                            if hasattr(intr, "value"):
+                                yield f"data: {json.dumps({'type': 'approval_required', 'pending': intr.value})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': f'state check: {e}'})}\n\n"
+
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # disable proxy buffering
+        },
+    )
 
 if __name__ == "__main__":
     import uvicorn

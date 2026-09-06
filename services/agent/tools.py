@@ -337,3 +337,36 @@ def read_file(file_path: str) -> str:
         return path.read_text(encoding="utf-8", errors="ignore")[:8000]
     except Exception as e:
         return f"ERROR reading file: {e}"
+
+
+@tool
+def grep_codebase(pattern: str, path: str = "", file_glob: str = "*") -> str:
+    """Search for an exact pattern (function name, variable, string, symbol,
+    equipment ID) across files. Returns matching lines with file:line references.
+    Use for 'where is X defined/used' questions. Supports regex.
+    file_glob filters by pattern e.g. '*.py' or '*.java'."""
+    import subprocess
+    root = f"/workspace/{path}" if path else "/workspace"
+    try:
+        result = subprocess.run(
+            ["grep", "-rn", "--include", file_glob, "-E", pattern, root],
+            capture_output=True, text=True, timeout=10
+        )
+        output = result.stdout[:6000]
+        if not output:
+            return f"No matches for '{pattern}' in {root}"
+        return output if len(output) < 6000 else output[:6000] + "\n... (truncated)"
+    except Exception as e:
+        return f"grep error: {e}"
+
+@tool
+def list_files(path: str = "") -> str:
+    """List files and directories. Use with grep_codebase to explore a project."""
+    import os
+    root = f"/workspace/{path}" if path else "/workspace"
+    try:
+        entries = sorted(os.listdir(root))
+        return "\n".join(f"{'📁' if os.path.isdir(os.path.join(root, e)) else '📄'} {e}"
+                         for e in entries[:100])
+    except Exception as e:
+        return f"Error: {e}"

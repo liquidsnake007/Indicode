@@ -1,0 +1,4 @@
+#!/bin/bash
+# Indicode CLI launcher
+cd "$(dirname "$0")"
+docker compose run --rm cli "$@"

@@ -236,6 +236,20 @@ services:
       timeout: 10s
       retries: 3
 
+  # ─── CLI: Indicode terminal client ─────────────────────────
+  cli:
+    build: ./services/cli
+    container_name: indicode-cli
+    stdin_open: true        # needed for interactive REPL
+    tty: true               # needed for the rich terminal UI
+    volumes:
+      - ./workspace:/workspace:ro    # read-only — CLI can view outputs
+    depends_on:
+      agent:
+        condition: service_healthy
+    networks:
+      - sovereign
+    entrypoint: ["python", "indicode.py"]
 
 volumes:
   loki-data:

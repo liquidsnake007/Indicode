@@ -22,8 +22,14 @@ from config import (
 )
 from tools import (
     search_knowledge, parse_document, analyze_image,
-    write_file, run_code, read_file,
+    write_file, run_code, read_file, list_files, grep_codebase
 )
+
+from openai import OpenAI as RawOpenAI
+
+# Module-level raw client for token-level streaming (bypasses langchain's wrapper
+# so we get direct access to delta.reasoning_content for the thinking tokens)
+_raw_llm_client = RawOpenAI(base_url=LITELLM_BASE_URL, api_key=LITELLM_API_KEY)
 
 TOOL_MAP = {
     "search_knowledge": search_knowledge,
@@ -32,17 +38,26 @@ TOOL_MAP = {
     "write_file": write_file,
     "run_code": run_code,
     "read_file": read_file,
+    "list_files": list_files,
+    "grep_codebase": grep_codebase
 }
 
-TOOL_DESCRIPTIONS = """
-Available tools (call exactly ONE per response):
-1. search_knowledge(query: str) — Search internal SOPs, manuals, correspondence.
-2. parse_document(file_path: str) — Parse a PDF/scanned doc via OCR.
-3. analyze_image(image_path: str, question: str) — Analyze an image (P&ID, photo, handwriting).
-4. write_file(filename: str, content: str) — Write a file. REQUIRES APPROVAL.
-5. run_code(code: str) — Execute Python in sandbox. REQUIRES APPROVAL.
-6. read_file(file_path: str) — Read a file from the workspace.
-"""
+TOOL_DESCRIPTIONS = """Available tools (call exactly ONE per response):
+1. search_knowledge(query: str) — Search internal SOPs, manuals, correspondence semantically. Use for policy/procedure questions ("what is the approval process").
+2. parse_document(file_path: str) — Parse a PDF/scanned doc via OCR. Returns full text content.
+3. analyze_image(image_path: str, question: str) — Analyze an image (P&ID, photo, handwriting). Use for visual documents.
+4. write_file(filename: str, content: str) — Write a file to outputs (.docx/.xlsx/.pptx/.py). REQUIRES APPROVAL.
+5. run_code(code: str) — Execute Python in sandbox. Use to verify calculations or test code. REQUIRES APPROVAL.
+6. read_file(file_path: str) — Read a file from the workspace. Use after grep/list to inspect specific files.
+7. grep_codebase(pattern: str, path: str, file_glob: str) — Search for exact text/regex across files. Returns file:line matches. Use for "where is X defined/used", finding symbols, equipment IDs, error messages.
+8. list_files(path: str) — List files/directories. Use to explore project structure before grepping or reading.
+
+Tool selection guide:
+- Policy/SOP/procedure questions ("how does X work", "what is the process for") → search_knowledge
+- Exact lookups ("where is calculate_thickness", "find HX-301", "which file has the leak") → grep_codebase
+- Exploring an unfamiliar codebase → list_files, then grep_codebase, then read_file
+- Scanned/handwritten/image documents → parse_document or analyze_image
+- Producing deliverables → write_file"""
 
 TOOL_FORMAT = """To call a tool, respond with ONLY this JSON (no other text):
 {"tool": "tool_name", "args": {"param1": "value1"}}
@@ -52,8 +67,11 @@ To give your FINAL answer (no more tool calls), respond with ONLY:
 
 Rules:
 - Call exactly ONE tool per response, then wait for its result.
-- Use tools step by step — don't try to do everything at once.
-- After you have enough information, use the "final" format.
+- When you see [TOOL RESULT], the tool has ALREADY EXECUTED. Read the result.
+- If a [TOOL RESULT] is already in the conversation, you MUST output {"final": ...} — do NOT call the same tool again.
+- NEVER call a tool whose result is already visible in the conversation.
+- Each tool may be called at most ONCE per question.
+- After you have enough information, always use the "final" format.
 - NEVER write JSON as part of other text — it must be the ENTIRE response."""
 
 
@@ -61,6 +79,7 @@ class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
     task_type: Optional[str]
     tool_plan: Optional[List[str]]
+    reasoning_text: Optional[str]   # ← NEW: batched reasoning from last LLM call
 
 
 # ─── Node 1: Classify (with keyword hardening) ──────────────
@@ -128,7 +147,39 @@ Reply with ONLY the word, nothing else."""
     return {"task_type": task_type}
 
 # ─── Node 2: Agent reasoning (explicit JSON format) ─────────
+def _get_writer():
+    """Get the LangGraph stream writer. Requires langgraph >= 0.2.45."""
+    from langgraph.config import get_stream_writer
+    return get_stream_writer()
+
+
+def _convert_messages_for_api(state_messages, system_prompt):
+    """Convert langchain message objects to OpenAI API dicts.
+    Tool-call AIMessages are rendered as visible assistant actions so the
+    model knows it already called a tool and can move to the final answer."""
+    api_messages = [{"role": "system", "content": system_prompt}]
+    for msg in state_messages:
+        if isinstance(msg, HumanMessage):
+            api_messages.append({"role": "user", "content": msg.content})
+        elif isinstance(msg, AIMessage):
+            # Tool-call messages: render the call as a visible assistant action
+            if msg.tool_calls:
+                tc = msg.tool_calls[0]
+                call_desc = f'[I called tool "{tc["name"]}" with args: {tc["args"]}]'
+                api_messages.append({"role": "assistant", "content": call_desc})
+            # Clean text responses (final answers)
+            elif msg.content and not msg.content.startswith('{"'):
+                api_messages.append({"role": "assistant", "content": msg.content})
+        elif isinstance(msg, ToolMessage):
+            api_messages.append({"role": "user", "content": f"[TOOL RESULT for my previous call] {msg.content}"})
+    return api_messages
+
 def agent_reasoning(state: AgentState) -> Dict:
+    """
+    The core agent node — now with token-level streaming.
+    Reasoning tokens (the model's thinking) and content tokens are
+    emitted as custom stream events while the full response accumulates.
+    """
     task_type = state.get("task_type") or "general"
     model_alias = {
         "coding": MODEL_CODER,
@@ -138,75 +189,101 @@ def agent_reasoning(state: AgentState) -> Dict:
         "general": MODEL_GENERAL,
     }.get(task_type, MODEL_GENERAL)
 
-    llm = ChatOpenAI(
-        model=model_alias,
-        base_url=LITELLM_BASE_URL,
-        api_key=LITELLM_API_KEY,
-        max_tokens=1500,
-        temperature=0,
-    )
+    writer = _get_writer()
 
-    # ── List available files so the model uses correct paths ──
+    # ── Build the system prompt (same as before) ────────────
     from pathlib import Path
     input_files = [f.name for f in Path("/workspace/inputs").rglob("*") if f.is_file()]
     file_listing = "\n".join(f"  - inputs/{f}" for f in input_files) or "  (none)"
 
     task_prompts = {
-        "coding": "You are an industrial coding assistant. Write code, then ALWAYS verify it with run_code before giving your final answer.",
-        "document": """You are an industrial document assistant. When the user asks for a document to be created (approval note, summary, report as .docx/.xlsx/.pptx), you MUST call write_file with the full content. NEVER just summarize in your final answer — always produce the actual file. Steps: 1) parse or search for source material, 2) call write_file with the complete document content, 3) confirm the file was created in your final answer.""",
-        "vision": "You are an industrial vision assistant. Use analyze_image for images. Report what you see.",
-        "search": "You are a knowledge search assistant. Use search_knowledge, then answer with citations.",
+        "coding": "You are an industrial coding assistant. Write code, verify with run_code.",
+        "document": "You are an industrial document assistant. Parse docs, search SOPs, create deliverables.",
+        "vision": "You are an industrial vision assistant. Use analyze_image for images.",
+        "search": "You are a knowledge search assistant. Use search_knowledge.",
         "general": "You are an industrial AI assistant.",
     }
 
     system_prompt = f"""{task_prompts.get(task_type, task_prompts['general'])}
+                        {TOOL_DESCRIPTIONS}
+                        Available files in the workspace:
+                        {file_listing}
+                        Use these EXACT filenames when calling tools. Do not guess filenames.
+                        {TOOL_FORMAT}
+                    """
 
-{TOOL_DESCRIPTIONS}
+    api_messages = _convert_messages_for_api(state["messages"], system_prompt)
 
-Available files in the workspace:
-{file_listing}
+    # ── STREAM the LLM call instead of one blocking invoke ──
+    writer({"type": "reasoning_start"})
+    
+    content_chunks = []
+    reasoning_chunks = []
+    saw_reasoning = False
+    
+    try:
+        stream = _raw_llm_client.chat.completions.create(
+            model=model_alias,
+            messages=api_messages,
+            max_tokens=1500,
+            temperature=0,
+            stream=True,
+        )
 
-Use these EXACT filenames when calling tools. Do not guess filenames.
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if delta is None:
+                continue
 
-{TOOL_FORMAT}"""
+            reasoning = getattr(delta, "reasoning_content", None)
+            if reasoning:
+                saw_reasoning = True
+                reasoning_chunks.append(reasoning)
+                writer({"type": "reasoning", "content": reasoning})   # ← per-token emit
 
-    # Build message list: system + conversation + tool results
-    messages = [SystemMessage(content=system_prompt)]
-    for msg in state["messages"]:
-        if isinstance(msg, HumanMessage):
-            messages.append(msg)
-        elif isinstance(msg, ToolMessage):
-            messages.append(HumanMessage(content=f"[TOOL RESULT] {msg.content}"))
-        elif isinstance(msg, AIMessage):
-            if msg.content and not msg.content.startswith('{"'):
-                messages.append(AIMessage(content=msg.content))
+            if delta.content:
+                content_chunks.append(delta.content)
+                # Content tokens are NOT emitted — they're JSON tool calls
+                # that look ugly raw. parse_and_route cleans them up.
 
-    response = llm.invoke(messages)
+    except Exception as e:
+        # Streaming failed — fall back to non-streaming invoke
+        writer({"type": "error", "message": f"stream error: {e}"})
+        from langchain_openai import ChatOpenAI
+        llm = ChatOpenAI(
+            model=model_alias,
+            base_url=LITELLM_BASE_URL,
+            api_key=LITELLM_API_KEY,
+            max_tokens=1500,
+            temperature=0,
+        )
+        messages = [SystemMessage(content=system_prompt)]
+        for msg in state["messages"]:
+            if isinstance(msg, HumanMessage):
+                messages.append(msg)
+            elif isinstance(msg, ToolMessage):
+                messages.append(HumanMessage(content=f"[TOOL RESULT] {msg.content}"))
+            elif isinstance(msg, AIMessage):
+                if msg.content and not msg.content.startswith('{"'):
+                    messages.append(AIMessage(content=msg.content))
+        response = llm.invoke(messages)
+        writer({"type": "reasoning_end"})
+        return {"messages": [response], "reasoning_text": ""}
 
-    # ── Handle empty content (model put output in reasoning) ──
-    if not response.content or not response.content.strip():
-        # Check if reasoning_content has something
-        reasoning = getattr(response, 'additional_kwargs', {}).get('reasoning_content', '')
-        if reasoning:
-            # Try to extract the JSON or final answer from the reasoning
-            import re as _re
-            json_match = _re.search(r'\{[^{}]*"tool"[^{}]*\}', reasoning)
-            final_match = _re.search(r'\{[^{}]*"final"[^{}]*\}', reasoning)
-            if json_match:
-                response = AIMessage(content=json_match.group())
-            elif final_match:
-                response = AIMessage(content=final_match.group())
-            else:
-                # Last 500 chars of reasoning might have the answer
-                response = AIMessage(content=reasoning[-500:])
-        else:
-            # Completely empty — retry once with simpler message
-            retry_messages = messages[:2]  # system + last message only
-            if len(messages) > 2:
-                retry_messages.append(messages[-1])
-            response = llm.invoke(retry_messages)
+    writer({"type": "reasoning_end"})
+    full_content = "".join(content_chunks)
+    reasoning_text = "".join(reasoning_chunks)   # ← NEW
 
-    return {"messages": [response]}
+    # Handle empty content (model put everything in reasoning)
+    if not full_content.strip() and saw_reasoning:
+        full_content = '{"final": "I was thinking but produced no answer. Please rephrase."}'
+    elif not full_content.strip():
+        full_content = '{"final": ""}'
+
+    response = AIMessage(content=full_content)
+    return {"messages": [response], "reasoning_text": reasoning_text}
 
 
 # ─── Node 3: Parse response and route ───────────────────────
@@ -296,7 +373,10 @@ def parse_and_route(state: AgentState) -> Dict:
 
     if isinstance(parsed, dict):
         if "final" in parsed:
-            return {"messages": [AIMessage(content=str(parsed["final"]))], "task_type": state.get("task_type")}
+            return {
+                "messages": [AIMessage(content=str(parsed["final"]))],
+                "task_type": state.get("task_type"),
+            }
 
         if "tool" in parsed and "args" in parsed:
             tool_name = str(parsed["tool"])
@@ -355,7 +435,6 @@ def human_approval(state: AgentState) -> Dict:
 
 # ─── Node 5: Execute tools ──────────────────────────────────
 def execute_tools(state: AgentState) -> Dict:
-    """Execute the pending tool call directly (no ToolNode)."""
     last = state["messages"][-1]
     if not hasattr(last, "tool_calls") or not last.tool_calls:
         return {}
@@ -375,7 +454,11 @@ def execute_tools(state: AgentState) -> Dict:
 
         try:
             result = tool_func.invoke(tool_args)
-            results.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
+            result_str = str(result)
+            results.append(ToolMessage(          # ← ADD THIS LINE (and the next)
+                content=result_str,
+                tool_call_id=tc["id"],
+            ))
         except Exception as e:
             results.append(ToolMessage(
                 content=f'ERROR executing {tool_name}: {str(e)}',
