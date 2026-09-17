@@ -12,7 +12,7 @@ processors:
     send_batch_size: 100
 
 exporters:
-  otlphttp/langfuse:                       # otlpHTTP, not otlp
+  otlphttp/langfuse:
     endpoint: http://langfuse-web:3000/api/public/otel
     headers:
       Authorization: "Basic ${env:LANGFUSE_BASIC_AUTH}"

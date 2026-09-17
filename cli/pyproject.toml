@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "indicode-cli"
+version = "0.8.0"
+description = "Sovereign On-Premise AI Workbench CLI"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.27",
+    "textual>=0.85",
+    "rich>=13.7",
+]
+
+[project.scripts]
+indicode = "indicode.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["indicode*"]

@@ -1,23 +1,25 @@
-# ── SECRETS ──
+# Secrets
 langfuse/.env
 langfuse-upstream/.env
 litellm/config.yaml
 
-# ── BIG / RUNTIME DATA (root-owned, container-generated) ──
+# Runtime data
 volumes/
 workspace/outputs/
 falco/pcap/
 falco/output/
 services/rag/flashrank_cache/
 
-# ── PYTHON ──
+# Python artifacts
 __pycache__/
 *.pyc
 .venv/
 
-# ── PERSONAL NOTES ──
+# Personal notes
 notes.md
 notes.txt
 notes*.md
 phase*plan*.md
 phase*conc.md
+volumes/agent-state/
+cli/indicode_cli.egg-info/

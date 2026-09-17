@@ -1,0 +1,40 @@
+Read the inspection report for HX-301 from inputs/samples, read the SOP for equipment approval from the knowledge base, and read the vendor correspondence. Then create a comprehensive approval note as final_approval_note.docx with the following structure:
+
+# APPROVAL NOTE: HX-301 TUBE BUNDLE REPLACEMENT
+
+## 1. EXECUTIVE SUMMARY
+A brief paragraph summarizing the critical findings, the recommended action, total estimated cost, and required downtime.
+
+## 2. EQUIPMENT DETAILS
+| Item | Detail |
+|------|--------|
+| Equipment ID | HX-301 |
+| Equipment Type | Heat Exchanger |
+| Location | Unit 3 |
+| Inspection Report | IR-2024-0178 |
+| Inspection Date | 15 March 2024 |
+| Inspector | R. Kumar, Senior Inspector |
+
+## 3. INSPECTION FINDINGS
+List all four findings from the inspection report with severity levels, measurements vs specifications, and required actions. Use bold for equipment identifiers and critical measurements.
+
+## 4. RECOMMENDED ACTIONS
+For each finding, state the priority level, action required, estimated timeline, and estimated cost if available from the vendor correspondence.
+
+## 5. VENDOR COMPARISON
+Create a table comparing the three vendors from the correspondence: name, quoted price, delivery time, and technical evaluation notes. Bold the recommended vendor.
+
+## 6. COST ANALYSIS
+Total project cost including the recommended vendor quotation and any additional repair costs mentioned in the inspection report.
+
+## 7. SAFETY ASSESSMENT
+State whether this repair involves pressure vessels or safety systems per the SOP requirements, and what sign-offs are therefore mandatory.
+
+## 8. APPROVAL REQUIREMENTS
+Based on the SOP, list who must approve this repair, in what order, and what documentation must accompany the approval.
+
+## 9. DOWNTIME IMPACT
+Estimated downtime, impact on production, and whether this aligns with the planned turnaround window.
+
+## 10. RECOMMENDATION
+A clear statement recommending approval, referencing all prior sections.

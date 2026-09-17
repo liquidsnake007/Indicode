@@ -1,19 +1,18 @@
 #!/bin/bash
-# Indicode Phase 3 — Full test suite
-# Run this AFTER the agent container is up and healthy
+# Run the full scorecard after the agent container is healthy.
 
 echo "═══════════════════════════════════════════════════════════════"
 echo "  INDICODE PHASE 3 — TEST SUITE"
 echo "═══════════════════════════════════════════════════════════════"
 echo ""
 
-# Helper to run chat inside the agent container
+# Run a chat request inside the agent container.
 agent_chat() {
-    docker exec indicode-agent python3 /tmp/agent_chat.py "$1"
+    docker exec indicode-agent python3 /tests/agent_chat.py "$1"
 }
 
 agent_approve() {
-    docker exec indicode-agent python3 /tmp/agent_approve.py "$1" "$2"
+    docker exec indicode-agent python3 /tests/agent_approve.py "$1" "$2"
 }
 
 # ─── Test 0: Health ──────────────────────────────────────────
@@ -51,7 +50,7 @@ echo "─── Test 3: Vision analysis"
 agent_chat "Read the handwritten site note and tell me what equipment problems were observed."
 echo ""
 
-# ─── Test 4: End-to-end approval note (the money demo) ───────
+# ─── Test 4: End-to-end approval note  ───────
 echo "─── Test 4: Approval note demo"
 echo "  This will hit the approval gate. Approve when prompted."
 agent_chat "Read the inspection report for HX-301 from inputs/samples, extract the key findings, and draft an approval note as approval_note_hx301.docx"
@@ -70,8 +69,11 @@ echo ""
 
 # ─── Test 6: Airgap still intact ─────────────────────────────
 echo "─── Test 6: Airgap verification"
-docker run --rm --network indicode-sovereign alpine wget -T3 -q -O- http://google.com 2>&1 | grep -q "can't connect\|unreachable\|timed out" \
-    && echo "  ✓ Egress blocked" || echo "  ✗ EGRESS NOT BLOCKED — CHECK NOW"
+if docker run --rm --network indicode-sovereign alpine wget -T3 -q -O- http://google.com >/dev/null 2>&1; then
+    echo "  ✗ EGRESS NOT BLOCKED — CHECK NOW"
+else
+    echo "  ✓ Egress blocked"
+fi
 echo ""
 
 echo "═══════════════════════════════════════════════════════════════"

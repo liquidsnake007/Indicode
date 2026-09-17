@@ -23,7 +23,7 @@ from prompt_toolkit.history import FileHistory
 
 console = Console()
 
-# ─── Configuration ───────────────────────────────────────────
+# Configuration.
 AGENT_URL = os.environ.get("INDICODE_AGENT_URL", "http://agent:8003")
 HISTORY_FILE = os.path.expanduser("~/.indicode_history")
 
@@ -52,7 +52,7 @@ class IndicodeCLI:
         self.session_start = time.time()
         self.messages_sent = 0
 
-    # ─── API calls ──────────────────────────────────────────
+    # API calls.
     def chat(self, message: str) -> dict:
         """Send a message to the agent, handle the response."""
         payload = {"message": message, "thread_id": self.thread_id}
@@ -83,7 +83,7 @@ class IndicodeCLI:
             response.raise_for_status()
             return response.json()
 
-    # ─── Display helpers ────────────────────────────────────
+    # Display helpers.
     def show_response(self, result: dict):
         """Render the agent's response nicely."""
         task_type = result.get("task_type", "unknown")
@@ -162,7 +162,7 @@ class IndicodeCLI:
                 if result.get("response"):
                     console.print(Panel(Markdown(result["response"]), border_style="red"))
 
-    # ─── Session management ─────────────────────────────────
+    # Session management.
     def resume_session(self, thread_id: str):
         """Resume an existing conversation."""
         self.thread_id = thread_id
@@ -181,7 +181,7 @@ class IndicodeCLI:
             except Exception:
                 console.print("[red]✗[/] Could not reach agent service")
 
-    # ─── Main loop ──────────────────────────────────────────
+    # Main loop.
     def chat_streaming(self, message: str):
         """Send a message and display progress live via SSE."""
         payload = {"message": message, "thread_id": self.thread_id}

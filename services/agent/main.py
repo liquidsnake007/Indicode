@@ -19,7 +19,7 @@ from langchain_core.messages import AIMessage
 
 app = FastAPI(title="Indicode Agent Service")
 
-# Build the graph once (module-level singleton)
+# Build the graph once when the service starts.
 agent_graph = build_agent_graph()
 
 
@@ -31,7 +31,7 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     thread_id: str
     response: Optional[str] = None
-    task_type: Optional[str] = None          # ← must have = None
+    task_type: Optional[str] = None
     pending_approval: Optional[Dict] = None
     tool_calls_made: list = []
 
@@ -152,6 +152,45 @@ async def get_state(thread_id: str):
             "task_type": state.values.get("task_type") if state.values else None,
             "message_count": len(state.values.get("messages", [])) if state.values else 0,
         }
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Thread not found: {e}")
+
+@app.get("/messages/{thread_id}")
+async def get_messages(thread_id: str):
+    """Return the full conversation for a thread (for TUI session resume)."""
+    config = {"configurable": {"thread_id": thread_id}}
+    try:
+        state = agent_graph.get_state(config)
+        if not state.values or "messages" not in state.values:
+            raise HTTPException(status_code=404, detail="Thread not found")
+
+        messages = []
+        for msg in state.values["messages"]:
+            msg_type = type(msg).__name__
+            content = str(getattr(msg, "content", ""))
+
+            if msg_type == "HumanMessage":
+                messages.append({"role": "user", "content": content})
+            elif msg_type == "AIMessage":
+                tool_calls = getattr(msg, "tool_calls", None)
+                if tool_calls:
+                    for tc in tool_calls:
+                        messages.append({
+                            "role": "tool_call",
+                            "tool": tc["name"],
+                            "args_preview": str(tc.get("args", ""))[:200],
+                        })
+                elif content and not content.startswith('{"'):
+                    messages.append({"role": "assistant", "content": content})
+            elif msg_type == "ToolMessage":
+                messages.append({
+                    "role": "tool_result",
+                    "content": content[:300],
+                })
+
+        return {"thread_id": thread_id, "messages": messages}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Thread not found: {e}")
 

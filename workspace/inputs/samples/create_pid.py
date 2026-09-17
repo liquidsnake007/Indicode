@@ -23,9 +23,7 @@ except Exception:
     small_font = ImageFont.load_default()
     title_font = ImageFont.load_default()
 
-# ─────────────────────────────────────────────
-# Title
-# ─────────────────────────────────────────────
+# Draw the title.
 
 draw.text(
     (300, 30),
@@ -41,9 +39,7 @@ draw.text(
     font=small_font
 )
 
-# ─────────────────────────────────────────────
-# Heat exchanger HX-301
-# ─────────────────────────────────────────────
+# Draw the heat exchanger.
 
 draw.rectangle(
     [100, 280, 280, 500],
@@ -65,9 +61,7 @@ draw.text(
     font=small_font
 )
 
-# ─────────────────────────────────────────────
-# Pump P-101
-# ─────────────────────────────────────────────
+# Draw the pump.
 
 draw.ellipse(
     [470, 250, 570, 350],
@@ -89,9 +83,7 @@ draw.text(
     font=font
 )
 
-# ─────────────────────────────────────────────
-# Tank TK-201
-# ─────────────────────────────────────────────
+# Draw the tank.
 
 draw.rectangle(
     [800, 230, 1050, 520],
@@ -113,9 +105,7 @@ draw.text(
     font=small_font
 )
 
-# ─────────────────────────────────────────────
-# Hot-side pipe
-# ─────────────────────────────────────────────
+# Draw the hot-side pipe.
 
 draw.line(
     [280, 330, 470, 300],
@@ -149,9 +139,7 @@ draw.text(
     font=small_font
 )
 
-# ─────────────────────────────────────────────
-# Cold-side pipe
-# ─────────────────────────────────────────────
+# Draw the cold-side pipe.
 
 draw.line(
     [800, 450, 570, 450],
@@ -185,9 +173,7 @@ draw.text(
     font=small_font
 )
 
-# ─────────────────────────────────────────────
-# Additional equipment labels
-# ─────────────────────────────────────────────
+# Draw additional equipment labels.
 
 draw.text(
     (90, 150),
@@ -203,9 +189,7 @@ draw.text(
     font=small_font
 )
 
-# ─────────────────────────────────────────────
-# Save
-# ─────────────────────────────────────────────
+# Save the generated diagram.
 
 output = "pid_hx301.png"
 

@@ -14,9 +14,7 @@ tab1, tab2, tab3 = st.tabs(["Sovereignty", "Services", "About"])
 with tab1:
     st.subheader("Egress Monitor (Falco)")
     falco_log = Path("/falco/output") if Path("/falco/output").exists() else None
-    # Falco output is mounted on the host at ./falco/output
-    # For the container, we'll mount it read-only in Phase 6
-    # For now, show a placeholder
+    # Falco output will be mounted read-only when the dashboard is expanded.
     st.info("Falco output will appear here once the dashboard container has access to ./falco/output (configured in Phase 6).")
     st.code("docker logs indicode-falco --tail 20", language="bash")
     st.caption("Run the above in a separate terminal to see live Falco events.")

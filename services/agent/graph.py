@@ -1,9 +1,8 @@
 """
 LangGraph agent with explicit JSON tool-calling.
-qwen3:8b cannot reliably emit structured tool calls via bind_tools,
-so we instruct it to output JSON in a strict format and parse it.
 """
 import json
+import os
 import re
 from typing import Annotated, TypedDict, Optional, List, Dict
 from langchain_core.messages import (
@@ -12,7 +11,7 @@ from langchain_core.messages import (
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END, START
 from langgraph.graph.message import add_messages
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import interrupt, Command
 
 from config import (
@@ -27,8 +26,7 @@ from tools import (
 
 from openai import OpenAI as RawOpenAI
 
-# Module-level raw client for token-level streaming (bypasses langchain's wrapper
-# so we get direct access to delta.reasoning_content for the thinking tokens)
+# Use the raw client to stream reasoning tokens directly.
 _raw_llm_client = RawOpenAI(base_url=LITELLM_BASE_URL, api_key=LITELLM_API_KEY)
 
 TOOL_MAP = {
@@ -46,18 +44,20 @@ TOOL_DESCRIPTIONS = """Available tools (call exactly ONE per response):
 1. search_knowledge(query: str) — Search internal SOPs, manuals, correspondence semantically. Use for policy/procedure questions ("what is the approval process").
 2. parse_document(file_path: str) — Parse a PDF/scanned doc via OCR. Returns full text content.
 3. analyze_image(image_path: str, question: str) — Analyze an image (P&ID, photo, handwriting). Use for visual documents.
-4. write_file(filename: str, content: str) — Write a file to outputs (.docx/.xlsx/.pptx/.py). REQUIRES APPROVAL.
+4. write_file(filename: str, content: str) — Write a file to outputs (.docx/.xlsx/.pptx/.py). REQUIRES APPROVAL. For .pptx, separate slides with "## Slide: Title" lines.
 5. run_code(code: str) — Execute Python in sandbox. Use to verify calculations or test code. REQUIRES APPROVAL.
 6. read_file(file_path: str) — Read a file from the workspace. Use after grep/list to inspect specific files.
 7. grep_codebase(pattern: str, path: str, file_glob: str) — Search for exact text/regex across files. Returns file:line matches. Use for "where is X defined/used", finding symbols, equipment IDs, error messages.
 8. list_files(path: str) — List files/directories. Use to explore project structure before grepping or reading.
 
 Tool selection guide:
-- Policy/SOP/procedure questions ("how does X work", "what is the process for") → search_knowledge
-- Exact lookups ("where is calculate_thickness", "find HX-301", "which file has the leak") → grep_codebase
-- Exploring an unfamiliar codebase → list_files, then grep_codebase, then read_file
+- Policy/SOP/procedure questions → search_knowledge
+- Exact lookups ("where is X", "find Y") → grep_codebase (searches the ENTIRE workspace)
+- Exploring code → ALWAYS list_files(path="") FIRST to see the full directory structure, THEN grep_codebase, THEN read_file
+- NEVER guess where files are. Use list_files to discover the structure before searching.
+- The workspace contains inputs/ (source documents) AND outputs/ (generated files). Search BOTH.
 - Scanned/handwritten/image documents → parse_document or analyze_image
-- Producing deliverables → write_file"""
+- Producing deliverables → write_file """
 
 TOOL_FORMAT = """To call a tool, respond with ONLY this JSON (no other text):
 {"tool": "tool_name", "args": {"param1": "value1"}}
@@ -66,23 +66,23 @@ To give your FINAL answer (no more tool calls), respond with ONLY:
 {"final": "your complete answer text here"}
 
 Rules:
+- ALWAYS use tools when they are needed. NEVER say "I can't do X" — check if a tool can do it.
+- NEVER show code in your response. Use run_code to execute it and write_file to save it.
 - Call exactly ONE tool per response, then wait for its result.
 - When you see [TOOL RESULT], the tool has ALREADY EXECUTED. Read the result.
-- If a [TOOL RESULT] is already in the conversation, you MUST output {"final": ...} — do NOT call the same tool again.
-- NEVER call a tool whose result is already visible in the conversation.
-- Each tool may be called at most ONCE per question.
+- If a [TOOL RESULT] is already in the conversation, output {"final": ...} — do NOT call the same tool again.
+- Each tool may be called at most ONCE per question (unless the result was an error and you're fixing the args).
 - After you have enough information, always use the "final" format.
 - NEVER write JSON as part of other text — it must be the ENTIRE response."""
-
 
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
     task_type: Optional[str]
     tool_plan: Optional[List[str]]
-    reasoning_text: Optional[str]   # ← NEW: batched reasoning from last LLM call
+    reasoning_text: Optional[str]
 
 
-# ─── Node 1: Classify (with keyword hardening) ──────────────
+# Classify requests with keywords and a model fallback.
 VISION_KEYWORDS = ("image", "photo", "picture", "handwritten", "note.jpg",
                    "note.jpeg", "png", "drawing", "diagram", "pid",
                    "site note", "what do you see", "look at")
@@ -99,7 +99,7 @@ SEARCH_KEYWORDS = ("what is the", "what are the", "how does", "sop",
                    "search", "find", "manual", "knowledge base")
 
 def classify_task(state: AgentState) -> Dict:
-    # Get the last human message
+    # Find the latest user message.
     last_human = None
     for msg in reversed(state["messages"]):
         if isinstance(msg, HumanMessage):
@@ -107,7 +107,7 @@ def classify_task(state: AgentState) -> Dict:
             break
     user_text = (last_human or "").lower()
 
-    # ── Keyword fast-path ──
+    # Use deterministic keywords before the model fallback.
     if any(kw in user_text for kw in VISION_KEYWORDS):
         return {"task_type": "vision"}
     if any(kw in user_text for kw in CODING_KEYWORDS):
@@ -117,7 +117,7 @@ def classify_task(state: AgentState) -> Dict:
     if any(kw in user_text for kw in SEARCH_KEYWORDS):
         return {"task_type": "search"}
 
-    # ── LLM fallback for ambiguous cases ──
+    # Classify ambiguous requests with the fallback model.
     classifier_llm = ChatOpenAI(
         model=MODEL_CLASSIFIER,
         base_url=LITELLM_BASE_URL,
@@ -146,7 +146,7 @@ Reply with ONLY the word, nothing else."""
 
     return {"task_type": task_type}
 
-# ─── Node 2: Agent reasoning (explicit JSON format) ─────────
+# Generate agent responses in the explicit JSON format.
 def _get_writer():
     """Get the LangGraph stream writer. Requires langgraph >= 0.2.45."""
     from langgraph.config import get_stream_writer
@@ -165,7 +165,8 @@ def _convert_messages_for_api(state_messages, system_prompt):
             # Tool-call messages: render the call as a visible assistant action
             if msg.tool_calls:
                 tc = msg.tool_calls[0]
-                call_desc = f'[I called tool "{tc["name"]}" with args: {tc["args"]}]'
+                # Render in the SAME JSON format we want the model to output
+                call_desc = json.dumps({"tool": tc["name"], "args": tc["args"]})
                 api_messages.append({"role": "assistant", "content": call_desc})
             # Clean text responses (final answers)
             elif msg.content and not msg.content.startswith('{"'):
@@ -176,9 +177,7 @@ def _convert_messages_for_api(state_messages, system_prompt):
 
 def agent_reasoning(state: AgentState) -> Dict:
     """
-    The core agent node — now with token-level streaming.
-    Reasoning tokens (the model's thinking) and content tokens are
-    emitted as custom stream events while the full response accumulates.
+    The core agent node — token-level streaming with retry on empty content.
     """
     task_type = state.get("task_type") or "general"
     model_alias = {
@@ -189,22 +188,76 @@ def agent_reasoning(state: AgentState) -> Dict:
         "general": MODEL_GENERAL,
     }.get(task_type, MODEL_GENERAL)
 
+    max_tokens = {
+        "document": 6000,
+        "coding": 3000,
+        "vision": 2000,
+        "search": 2000,
+        "general": 2000,
+    }.get(task_type, 2000)
+
     writer = _get_writer()
 
-    # ── Build the system prompt (same as before) ────────────
     from pathlib import Path
-    input_files = [f.name for f in Path("/workspace/inputs").rglob("*") if f.is_file()]
-    file_listing = "\n".join(f"  - inputs/{f}" for f in input_files) or "  (none)"
+    workspace_files = []
+    for f in Path("/workspace").rglob("*"):
+        if f.is_file() and ".sandbox" not in str(f):
+            rel = f.relative_to("/workspace")
+            workspace_files.append(f"  {rel}")
+    file_listing = "\n".join(workspace_files[:30]) or "  (empty)"
+    if len(workspace_files) > 30:
+        file_listing += f"\n  ... and {len(workspace_files) - 30} more files"
 
     task_prompts = {
-        "coding": "You are an industrial coding assistant. Write code, verify with run_code.",
-        "document": "You are an industrial document assistant. Parse docs, search SOPs, create deliverables.",
+        "coding": """You are Indicode, an industrial coding assistant.
+
+        Workflow (follow this EXACT sequence, then STOP):
+        1. Call run_code ONCE to verify the calculation works.
+        2. After seeing the result, call write_file ONCE to save the code as a .py file.
+        3. After both results are visible, output {"final": "..."} immediately.
+
+        STOPPING RULES (these override everything else):
+        - If you see a [TOOL RESULT for my previous call] from run_code in the conversation, do NOT call run_code again. Move to step 2.
+        - If you see a [TOOL RESULT for my previous call] from write_file in the conversation, do NOT call any more tools. Output {"final": "..."} now.
+        - Never call the same tool twice. Never call more than 2 tools total for a coding task.
+
+        If you have already called run_code and write_file and both succeeded, your ONLY valid response is {"final": "..."}.
+
+        Never show code in your response text. Never say "I can't write files" — use the write_file tool.""",
+        "document": """You are an industrial document assistant.
+
+        CRITICAL RULES:
+        1. When the user asks for a document, call write_file ONCE with the full content.
+        2. After write_file succeeds, output {"final": "..."} immediately.
+        3. NEVER echo the user's prompt back to them.
+        4. NEVER repeat the document content in your final answer — just confirm the file was created.
+
+        STOPPING RULES:
+        - If you see a [TOOL RESULT for my previous call] from write_file, output {"final": "..."} NOW.
+        - If you see a [TOOL RESULT for my previous call] from parse_document or search_knowledge, call write_file NEXT.
+        - Maximum 3 tool calls total for any document task.
+
+        Document content format (for the write_file content parameter):
+        - Use # for the title, ## for section headings
+        - Use | table | rows | for tables
+        - Use **bold** for emphasis
+        - Use - for bullet points""",
         "vision": "You are an industrial vision assistant. Use analyze_image for images.",
-        "search": "You are a knowledge search assistant. Use search_knowledge.",
-        "general": "You are an industrial AI assistant.",
+        "search": "You are a knowledge search assistant. Call search_knowledge ONCE, then answer with citations.",
+        "general": """You are an industrial AI assistant.
+
+        Answer ordinary questions directly and helpfully. Tools are optional,
+        not mandatory: use them only when the answer depends on internal
+        documents, workspace files, images, calculations, or creating a file.
+        If no tool is needed, answer now using {\"final\": \"...\"}. Never
+        refuse or ask the user to tell you to continue merely because no tool
+        applies.""",
     }
 
-    system_prompt = f"""{task_prompts.get(task_type, task_prompts['general'])}
+    default_prompt = task_prompts.get("general", "You are an industrial AI assistant.")
+    task_prompt = task_prompts.get(task_type, default_prompt)
+
+    system_prompt = f"""{task_prompt}
                         {TOOL_DESCRIPTIONS}
                         Available files in the workspace:
                         {file_listing}
@@ -214,18 +267,18 @@ def agent_reasoning(state: AgentState) -> Dict:
 
     api_messages = _convert_messages_for_api(state["messages"], system_prompt)
 
-    # ── STREAM the LLM call instead of one blocking invoke ──
+    # ── STREAM the LLM call ──────────────────────────────────
     writer({"type": "reasoning_start"})
-    
+
     content_chunks = []
     reasoning_chunks = []
     saw_reasoning = False
-    
+
     try:
         stream = _raw_llm_client.chat.completions.create(
             model=model_alias,
             messages=api_messages,
-            max_tokens=1500,
+            max_tokens=max_tokens,
             temperature=0,
             stream=True,
         )
@@ -241,12 +294,10 @@ def agent_reasoning(state: AgentState) -> Dict:
             if reasoning:
                 saw_reasoning = True
                 reasoning_chunks.append(reasoning)
-                writer({"type": "reasoning", "content": reasoning})   # ← per-token emit
+                writer({"type": "reasoning", "content": reasoning})
 
             if delta.content:
                 content_chunks.append(delta.content)
-                # Content tokens are NOT emitted — they're JSON tool calls
-                # that look ugly raw. parse_and_route cleans them up.
 
     except Exception as e:
         # Streaming failed — fall back to non-streaming invoke
@@ -256,7 +307,7 @@ def agent_reasoning(state: AgentState) -> Dict:
             model=model_alias,
             base_url=LITELLM_BASE_URL,
             api_key=LITELLM_API_KEY,
-            max_tokens=1500,
+            max_tokens=max_tokens,
             temperature=0,
         )
         messages = [SystemMessage(content=system_prompt)]
@@ -274,39 +325,105 @@ def agent_reasoning(state: AgentState) -> Dict:
 
     writer({"type": "reasoning_end"})
     full_content = "".join(content_chunks)
-    reasoning_text = "".join(reasoning_chunks)   # ← NEW
+    reasoning_text = "".join(reasoning_chunks)
 
-    # Handle empty content (model put everything in reasoning)
+    # Retry when thinking consumes the response budget.
     if not full_content.strip() and saw_reasoning:
-        full_content = '{"final": "I was thinking but produced no answer. Please rephrase."}'
-    elif not full_content.strip():
-        full_content = '{"final": ""}'
+        writer({"type": "retry", "message": "Empty content, retrying with direct instruction"})
+
+        # Extract the original request for the retry.
+        user_request = ""
+        for msg in reversed(state["messages"]):
+            if isinstance(msg, HumanMessage):
+                user_request = msg.content[:500]  # truncate for retry prompt
+                break
+
+        # Build a short retry prompt that asks for an immediate tool call.
+        retry_messages = [
+            {"role": "system", "content": f"""{task_prompt}
+
+{TOOL_DESCRIPTIONS}
+
+{TOOL_FORMAT}
+
+CRITICAL: Output the JSON tool call NOW. Do not think extensively. Generate the write_file call immediately."""},
+            {"role": "user", "content": f"Create the document now. User's request: {user_request}"},
+        ]
+
+        try:
+            retry_stream = _raw_llm_client.chat.completions.create(
+                model=model_alias,
+                messages=retry_messages,
+                max_tokens=max_tokens,
+                temperature=0,
+                stream=True,
+            )
+            retry_content = []
+            for chunk in retry_stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                if delta is None:
+                    continue
+                if delta.content:
+                    retry_content.append(delta.content)
+
+            full_content = "".join(retry_content)
+            if full_content.strip():
+                # Use the retry response when it contains content.
+                writer({"type": "retry_success"})
+        except Exception:
+            pass  # Retry also failed, fall through to the empty check below
+
+    # Handle still-empty content
+    if not full_content.strip():
+        full_content = '{"final": "I generated reasoning but no actionable content. The prompt may be too long — try a shorter version or use /prompt to send from a file."}'
+        if not saw_reasoning:
+            full_content = '{"final": ""}'
 
     response = AIMessage(content=full_content)
     return {"messages": [response], "reasoning_text": reasoning_text}
 
 
-# ─── Node 3: Parse response and route ───────────────────────
+# Parse the model response and route tool calls.
 def parse_and_route(state: AgentState) -> Dict:
     """
     Parses the agent's response. Handles:
     1. Direct JSON: {"tool": ..., "args": {...}} or {"final": "..."}
     2. JSON embedded in text (with preamble)
-    3. JSON with nested objects (like args containing content strings with braces)
-    4. Non-JSON text → treated as final answer
+    3. JSON with nested objects (brace counting)
+    4. Narrative tool-call format
+    5. Echo-back detection (model parroting the user's prompt)
     """
     last = state["messages"][-1]
     content = last.content if hasattr(last, 'content') else ""
-    
-    # DEBUG logging
+
+    # Keep parser diagnostics available during development.
     print(f"\n[PARSE DEBUG] content type: {type(last).__name__}")
     print(f"[PARSE DEBUG] content (first 200): {content[:200]}")
     print(f"[PARSE DEBUG] has tool_calls: {hasattr(last, 'tool_calls') and bool(last.tool_calls)}\n")
 
-    # ── Method 1: Try direct JSON parse (strip code fences first) ──
+    # Reject responses that simply echo the user's prompt.
+    if len(content) > 200:
+        for msg in reversed(state["messages"][:-1]):
+            if isinstance(msg, HumanMessage) and msg.content:
+                # Compare the leading portions of the response and prompt.
+                content_start = content[:150].strip().lower()
+                prompt_start = msg.content[:150].strip().lower()
+                # Treat a matching prefix as an echo.
+                if content_start[:80] == prompt_start[:80]:
+                    print(f"[PARSE DEBUG] ECHO DETECTED — rejecting")
+                    return {
+                        "messages": [AIMessage(
+                            content='{"final": "The model echoed your prompt instead of generating a document. Please try again — if the prompt is very long, use /prompt to send it from a file."}'
+                        )],
+                        "task_type": state.get("task_type"),
+                    }
+                break  # only check the most recent user message
+
+    # ── Method 1: Try direct JSON parse (strip code fences) ──
     cleaned = content.strip()
     if cleaned.startswith("```"):
-        # Remove markdown code fences
         cleaned = re.sub(r'^```(?:json)?\s*\n?', '', cleaned)
         cleaned = re.sub(r'\n?```\s*$', '', cleaned)
 
@@ -320,7 +437,6 @@ def parse_and_route(state: AgentState) -> Dict:
     if not parsed:
         start = content.find('{')
         if start != -1:
-            # Count braces to find the matching close
             depth = 0
             in_string = False
             escape = False
@@ -336,7 +452,7 @@ def parse_and_route(state: AgentState) -> Dict:
                     in_string = not in_string
                     continue
                 if in_string:
-                    continue  # inside a string — braces don't count
+                    continue
                 if char == '{':
                     depth += 1
                 elif char == '}':
@@ -350,7 +466,6 @@ def parse_and_route(state: AgentState) -> Dict:
                 try:
                     parsed = json.loads(json_str)
                 except json.JSONDecodeError:
-                    # JSON might have unescaped quotes in content — try fixing
                     fixed = json_str.replace('\n', '\\n').replace('\t', '\\t')
                     try:
                         parsed = json.loads(fixed)
@@ -362,13 +477,25 @@ def parse_and_route(state: AgentState) -> Dict:
         final_match = re.search(r'"final"\s*:\s*"(.*)"\s*\}', content, re.DOTALL)
         if final_match:
             final_text = final_match.group(1)
-            # Unescape
             final_text = final_text.replace('\\n', '\n').replace('\\"', '"')
             return {"messages": [AIMessage(content=final_text)], "task_type": state.get("task_type")}
 
+    # ── Method 4: Recognize narrative tool-call format ──
+    if not parsed and content.strip().startswith("[I called tool"):
+        narr_match = re.search(
+            r'\[I called tool "([^"]+)" with args: (\{.*\})\]',
+            content, re.DOTALL
+        )
+        if narr_match:
+            tool_name = narr_match.group(1)
+            try:
+                tool_args = json.loads(narr_match.group(2))
+                parsed = {"tool": tool_name, "args": tool_args}
+            except json.JSONDecodeError:
+                pass
+
     # ── Handle parsed result ──────────────────────────────────
     if not parsed:
-        # Can't parse — treat as final answer
         return {"messages": [AIMessage(content=content)], "task_type": state.get("task_type")}
 
     if isinstance(parsed, dict):
@@ -386,7 +513,6 @@ def parse_and_route(state: AgentState) -> Dict:
                 error_msg = AIMessage(content=f'[TOOL ERROR] Unknown tool "{tool_name}". Valid: {list(TOOL_MAP.keys())}')
                 return {"messages": [error_msg], "task_type": state.get("task_type")}
 
-            # Convert to structured tool call
             tool_call_msg = AIMessage(
                 content="",
                 tool_calls=[{
@@ -397,11 +523,9 @@ def parse_and_route(state: AgentState) -> Dict:
             )
             return {"messages": [tool_call_msg], "task_type": state.get("task_type")}
 
-    # Unrecognized structure — treat as final
     return {"messages": [AIMessage(content=content)], "task_type": state.get("task_type")}
 
-
-# ─── Node 4: Approval gate ──────────────────────────────────
+# Pause sensitive tool calls for human approval.
 def human_approval(state: AgentState) -> Dict:
     last_message = state["messages"][-1]
     if not hasattr(last_message, "tool_calls") or not last_message.tool_calls:
@@ -433,7 +557,7 @@ def human_approval(state: AgentState) -> Dict:
     return {}
 
 
-# ─── Node 5: Execute tools ──────────────────────────────────
+# Execute approved tool calls.
 def execute_tools(state: AgentState) -> Dict:
     last = state["messages"][-1]
     if not hasattr(last, "tool_calls") or not last.tool_calls:
@@ -468,7 +592,7 @@ def execute_tools(state: AgentState) -> Dict:
     return {"messages": results}
 
 
-# ─── Build the graph ────────────────────────────────────────
+# Build the persistent agent graph.
 def build_agent_graph():
     """
     START → classify → agent → parse → 
@@ -516,5 +640,9 @@ def build_agent_graph():
 
     graph.add_edge("tools", "agent")
 
-    memory = MemorySaver()
+    import sqlite3
+    db_path = os.environ.get("AGENT_DB_PATH", "/app/state/agent_state.db")
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    memory = SqliteSaver(conn)
     return graph.compile(checkpointer=memory)

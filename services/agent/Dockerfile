@@ -3,7 +3,7 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Install Docker CLI (client only, not the daemon) for run_code sandbox
+# Install Docker CLI for run_code sandbox
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
