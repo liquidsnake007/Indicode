@@ -126,12 +126,14 @@ class HelpModal(ModalScreen):
   /new        Start a new conversation
   /history    Show session history (click to resume)
   /prompt     Send a prompt from a file
+  /rag        Index a file into the knowledge base
   /thinking   Toggle reasoning visibility
   /outputs    List generated files
   /thread     Show current thread ID
   /status     Show connection status
   /model      Show model routing info
   /clear      Clear the chat view
+  /quit       Quit Indicode
 
 [#858585]Press Escape to close[/]
 """
@@ -229,6 +231,7 @@ class ChatScreen(ModalScreen):
         width: 1fr;
         height: 9;
         max-height: 9;
+        overflow-y: auto;
         padding: 1 2;
         background: #252525;
         border: solid #454545;
@@ -253,12 +256,14 @@ class ChatScreen(ModalScreen):
         ("/new",      "Start a new conversation"),
         ("/history",  "Show session history (click to resume)"),
         ("/prompt",   "Send a prompt from a file"),
+        ("/rag",      "Index a file into the knowledge base"),
         ("/thinking", "Toggle reasoning visibility"),
         ("/outputs",  "List generated files"),
         ("/thread",   "Show current thread ID"),
         ("/status",   "Show connection status"),
         ("/model",    "Show model routing info"),
         ("/clear",    "Clear the chat view"),
+        ("/quit",     "Quit Indicode"),
     ]
 
     def __init__(self, client: AgentClient, sessions: list, **kwargs):
@@ -283,7 +288,7 @@ class ChatScreen(ModalScreen):
             yield Switch(value=True, id="think-toggle")
 
         yield VerticalScroll(id="chat")
-        yield Static("", id="command-hints")
+        yield VerticalScroll(Static("", id="command-hint-content"), id="command-hints")
 
         with Vertical(id="input-area"):
             yield TextArea(
@@ -356,22 +361,28 @@ class ChatScreen(ModalScreen):
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         text = event.text_area.text
-        hints = self.query_one("#command-hints", Static)
+        hints = self.query_one("#command-hints", VerticalScroll)
         if not text or not text.startswith("/") or "\n" in text or len(text) > 25:
-            hints.update("")
+            self._set_command_hints("")
             hints.display = False
             return
         query = text.lower().strip()
         matches = [(cmd, desc) for cmd, desc in self._COMMANDS if cmd.startswith(query)]
         if not matches:
-            hints.update("")
+            self._set_command_hints("")
             hints.display = False
             return
         lines = ["[#62c8ff bold]COMMANDS[/]"]
-        for cmd, desc in matches[:6]:
+        for cmd, desc in matches[:20]:
             lines.append(f"  [#d4d4d4 bold]{cmd:<14}[/] [#777777]{desc}[/]")
-        hints.update("\n".join(lines))
+        self._set_command_hints("\n".join(lines))
         hints.display = True
+
+    def _set_command_hints(self, text: str) -> None:
+        hints = self.query_one("#command-hints", VerticalScroll)
+        content = hints.query_one("#command-hint-content", Static)
+        content.update(text)
+        hints.scroll_home(animate=False)
 
     def on_key(self, event) -> None:
         if event.key in ("ctrl+j", "ctrl+enter", "ctrl+m"):
@@ -380,8 +391,8 @@ class ChatScreen(ModalScreen):
             if not text:
                 return
             ta.text = ""
-            hints = self.query_one("#command-hints", Static)
-            hints.update("")
+            hints = self.query_one("#command-hints", VerticalScroll)
+            self._set_command_hints("")
             hints.display = False
 
             if text.startswith("/"):
@@ -397,6 +408,8 @@ class ChatScreen(ModalScreen):
 
     def _handle_command(self, text: str) -> None:
         cmd = text.lower().strip("/")
+        if not cmd.strip():
+            return
         parts = cmd.split(maxsplit=1)
         command = parts[0]
         args = parts[1] if len(parts) > 1 else ""
@@ -411,6 +424,7 @@ class ChatScreen(ModalScreen):
             "status": self.action_show_status,
             "model": self.action_show_model,
             "clear": self.action_clear_chat,
+            "quit": self.app.action_quit, "q": self.app.action_quit,
         }
 
         if command in ("prompt", "p") and args:
@@ -428,6 +442,28 @@ class ChatScreen(ModalScreen):
             else:
                 self._post_safe(f"[#F44747]File not found: {filepath}[/]",
                                css_class="error-line")
+            return
+
+        if command in ("rag", "ingest") and args:
+            filepath = os.path.expanduser(args.strip().strip('"'))
+            if not os.path.isfile(filepath):
+                self._post_safe(
+                    f"[#F44747]File not found: {filepath}[/]",
+                    css_class="error-line",
+                )
+            else:
+                self._post_safe(
+                    f"[#62c8ff]Indexing {os.path.basename(filepath)}...[/]",
+                    css_class="status-line",
+                )
+                self._ingest_rag(filepath)
+            return
+
+        if command in ("rag", "ingest"):
+            self._post_safe(
+                "[#F44747]Usage: /rag <path-to-file>[/]",
+                css_class="error-line",
+            )
             return
 
         if command in ("resume", "r") and args:
@@ -578,6 +614,20 @@ class ChatScreen(ModalScreen):
             )
 
         self._ui(self.scroll_chat)
+
+    @work(thread=True)
+    def _ingest_rag(self, filepath: str) -> None:
+        try:
+            result = self.client.ingest_file(filepath)
+            self._post_safe(
+                f"[#75d69a]✓ Indexed {result.get('filename', os.path.basename(filepath))}[/]",
+                css_class="status-line",
+            )
+        except Exception as error:
+            self._post_safe(
+                f"[#ff7777]✗ RAG ingestion failed: {error}[/]",
+                css_class="error-line",
+            )
 
     # Render streamed reasoning text.
 
@@ -914,6 +964,9 @@ class IndicodeTUI(App):
             # Commands that work directly on the homepage
             if cmd in ("help", "h"):
                 self.push_screen(HelpModal())
+                return
+            elif cmd in ("quit", "q", "exit"):
+                self.action_quit()
                 return
             elif cmd in ("history", "hist"):
                 def _on_result(thread_id):

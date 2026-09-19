@@ -1,4 +1,5 @@
 import json
+import os
 import httpx
 
 class AgentClient:
@@ -33,3 +34,13 @@ class AgentClient:
             resp = client.post(f"{self.base_url}/approve", json=payload)
             resp.raise_for_status()
             return resp.json()
+
+    def ingest_file(self, path: str):
+        with open(path, "rb") as file_handle:
+            response = httpx.post(
+                f"{self.base_url}/rag",
+                files={"file": (os.path.basename(path), file_handle)},
+                timeout=600.0,
+            )
+        response.raise_for_status()
+        return response.json()

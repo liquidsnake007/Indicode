@@ -9,6 +9,7 @@ python-docx
 openpyxl
 python-pptx
 fastapi
+python-multipart
 uvicorn[standard]
 opentelemetry-sdk
 opentelemetry-exporter-otlp

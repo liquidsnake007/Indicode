@@ -31,6 +31,12 @@ services:
     container_name: indicode-litellm
     volumes:
       - ./litellm/config.yaml:/app/config.yaml
+    environment:
+      # Create these project keys in the self-hosted Langfuse UI. The hostname
+      # is internal-only; it never traverses the public network.
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
+      - LANGFUSE_HOST=${LANGFUSE_HOST:-http://langfuse-web:3000}
     command: ["--config", "/app/config.yaml", "--port", "4000"]
 
     depends_on:
@@ -39,6 +45,7 @@ services:
 
     networks:
       - sovereign
+      - langfuse
 
     ports:
       - "127.0.0.1:4000:4000"
@@ -134,11 +141,17 @@ services:
     networks:
       - sovereign
       - edge
+      - langfuse
 
   # Dashboard
   dashboard:
     build: ./dashboard
     container_name: indicode-dashboard
+    volumes:
+      - ./workspace/outputs:/workspace/outputs:ro
+      - ./falco/output:/falco/output:ro
+      - ./falco/pcap:/falco/pcap:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - sovereign
       - edge
@@ -262,3 +275,6 @@ networks:
   edge:
     internal: false
     name: indicode-edge
+  langfuse:
+    external: true
+    name: langfuse-upstream_default

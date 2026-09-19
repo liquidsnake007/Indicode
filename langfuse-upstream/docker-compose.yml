@@ -25,6 +25,7 @@ services:
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000} # CHANGEME: generate via `openssl rand -hex 32`
       TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-true}
       LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: ${LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES:-false}
+      LANGFUSE_MIGRATION_V4_WRITE_MODE: ${LANGFUSE_MIGRATION_V4_WRITE_MODE:-}
       LANGFUSE_LLM_CONNECTION_WHITELISTED_HOST: ${LANGFUSE_LLM_CONNECTION_WHITELISTED_HOST:-}
       LANGFUSE_LLM_CONNECTION_WHITELISTED_IPS: ${LANGFUSE_LLM_CONNECTION_WHITELISTED_IPS:-}
       LANGFUSE_LLM_CONNECTION_WHITELISTED_IP_SEGMENTS: ${LANGFUSE_LLM_CONNECTION_WHITELISTED_IP_SEGMENTS:-}
@@ -104,8 +105,14 @@ services:
     depends_on: *langfuse-depends-on
     ports:
       - "127.0.0.1:3000:3000"
+    networks:
+      - default
+      - indicode-sovereign
     environment:
       <<: *langfuse-worker-env
+      # The container is attached to the Langfuse and Indicode networks.
+      # Bind all interfaces so Nginx can reach it on indicode-sovereign.
+      HOSTNAME: 0.0.0.0
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-mysecret} # CHANGEME
       LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: ${LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT:-http://localhost:9090}
       LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-}
@@ -209,6 +216,10 @@ volumes:
   langfuse_clickhouse_logs:
     driver: local
   langfuse_minio_data:
-    driver: local
   langfuse_redis_data:
     driver: local
+
+networks:
+  indicode-sovereign:
+    external: true
+    name: indicode-sovereign

@@ -38,6 +38,8 @@ router_settings:
 
 litellm_settings:
   drop_params: true
+  # Self-hosted Langfuse callback. Set the three LANGFUSE_* variables in .env.
+  success_callback: ["langfuse"]
 
 general_settings:
   master_key: REPLACE_WITH_YOUR_LOCAL_KEY

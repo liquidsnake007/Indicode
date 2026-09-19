@@ -36,3 +36,10 @@ docker compose up -d
 
 # 5. Verify the airgap (must fail)
 docker run --rm --network indicode-sovereign alpine wget -T3 http://google.com
+
+## Terminal commands
+
+In the terminal client, use `/quit` when the Ctrl+Q keybinding is unavailable.
+To add a local document to the knowledge base, enter `/rag <path-to-file>`; for
+example, `/rag ~/Documents/vendor-quote.pdf`. The client uploads the selected
+file to the agent service, which stores and indexes it through the RAG service.

@@ -6,12 +6,14 @@ Endpoints:
   GET  /state/{thread_id} — inspect current state (for the dashboard)
   GET  /health
 """
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
 import json
 import uuid
+from pathlib import Path
+import httpx
 
 from graph import build_agent_graph
 from langgraph.types import Command
@@ -45,6 +47,24 @@ class ApproveRequest(BaseModel):
 @app.get("/health")
 def health():
     return {"status": "healthy", "service": "agent"}
+
+
+@app.post("/rag")
+async def ingest_rag_file(file: UploadFile = File(...)):
+    filename = Path(file.filename or "uploaded-document").name
+    destination = Path("/workspace/inputs") / filename
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(await file.read())
+    try:
+        response = httpx.post(
+            "http://rag:8001/ingest",
+            json={"file_path": str(destination)},
+            timeout=600.0,
+        )
+        response.raise_for_status()
+        return {"filename": filename, **response.json()}
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"RAG ingestion failed: {error}")
 
 
 @app.post("/chat", response_model=ChatResponse)
