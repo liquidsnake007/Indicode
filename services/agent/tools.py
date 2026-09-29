@@ -193,8 +193,21 @@ def search_knowledge(query: str) -> str:
     if not result.get("results"):
         return "No relevant documents found in the knowledge base."
 
-    # Format for the LLM: passages + sources
-    parts = [f"Found {len(result['results'])} relevant passages:\n"]
+    provenance = [
+        {
+            "filename": item.get("filename"),
+            "source_file": item.get("source"),
+            "chunk_index": item.get("chunk_index"),
+            "vector_score": item.get("vector_score"),
+            "rerank_score": item.get("rerank_score"),
+        }
+        for item in result["results"]
+    ]
+
+    parts = [
+        f"RAG_PROVENANCE: {json.dumps(provenance, separators=(',', ':'))}",
+        f"Found {len(result['results'])} relevant passages:\n",
+    ]
     for i, r in enumerate(result["results"], 1):
         parts.append(f"[Passage {i} | Source: {r['filename']}]\n{r['text']}\n")
     return "\n---\n".join(parts)

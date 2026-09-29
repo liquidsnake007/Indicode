@@ -1,13 +1,6 @@
-- list: sovereign_allowlist_cidr
-  items:
-    - "10.0.0.0/8"
-    - "172.16.0.0/12"
-    - "192.168.0.0/16"
-    - "127.0.0.1"
-
 - macro: is_sovereign_allowlisted
   condition: >
-    fd.sip in (sovereign_allowlist_cidr)
+    fd.sip = "127.0.0.1"
 
 - rule: Sovereign Egress Attempt
   desc: Any outbound connect() to a non-RFC1918 destination

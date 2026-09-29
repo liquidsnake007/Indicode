@@ -5,6 +5,7 @@ import html
 import json
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -103,7 +104,9 @@ def output_files() -> list[dict]:
 
 
 def status_grid() -> dict[str, bool]:
-    health = {name: get_json(url)[0] for name, url in SERVICES.items()}
+    with ThreadPoolExecutor(max_workers=len(SERVICES)) as executor:
+        results = executor.map(lambda url: get_json(url)[0], SERVICES.values())
+        health = dict(zip(SERVICES, results))
     health["Falco"] = FALCO_OUTPUT.exists()
     return health
 

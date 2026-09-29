@@ -5,8 +5,8 @@ services:
     container_name: indicode-ollama
     environment:
       - OLLAMA_MAX_LOADED_MODELS=2
-      - OLLAMA_NUM_PARALLEL=1           # no concurrent inference
-      - OLLAMA_KEEP_ALIVE=10m           # model stays warm 10 min after last use
+      - OLLAMA_NUM_PARALLEL=1          
+      - OLLAMA_KEEP_ALIVE=10m           
       - OLLAMA_FLASH_ATTENTION=1
     volumes:
       - ./volumes/ollama:/root/.ollama

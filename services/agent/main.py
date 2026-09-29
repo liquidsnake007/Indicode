@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from typing import Optional, Dict, Any
 import json
 import uuid
+import re
 from pathlib import Path
 import httpx
 
@@ -264,7 +265,17 @@ def chat_stream(req: ChatRequest):
                             msgs = node_output.get("messages", [])
                             for msg in msgs:
                                 if hasattr(msg, "content") and msg.content:
-                                    preview = str(msg.content)[:200]
+                                    content = str(msg.content)
+                                    provenance = re.search(
+                                        r"RAG_PROVENANCE:\s*(\[[^\n]+])",
+                                        content,
+                                    )
+                                    if provenance:
+                                        try:
+                                            yield f"data: {json.dumps({'type': 'rag_provenance', 'items': json.loads(provenance.group(1))})}\n\n"
+                                        except json.JSONDecodeError:
+                                            pass
+                                    preview = content[:200]
                                     yield f"data: {json.dumps({'type': 'tool_result', 'tool': 'tool', 'content_preview': preview})}\n\n"
 
         except Exception as e:

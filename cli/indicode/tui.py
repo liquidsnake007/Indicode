@@ -2,16 +2,21 @@
 Indicode TUI
 """
 import json
+import math
 import os
+import random
 import threading
 from datetime import datetime
 
 import httpx
+from rich.style import Style
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Center, VerticalScroll, Horizontal, Vertical
 from textual.widgets import (
     Input, Static, Button, Label, Switch, TextArea,
 )
+from textual.widget import Widget
 from textual.screen import ModalScreen
 from textual import work
 from textual.binding import Binding
@@ -61,6 +66,291 @@ def save_sessions(sessions: list):
     except Exception:
         pass
 
+
+# Ambient background widget: rotating braille globe with India highlighted.
+
+class RotatingGlobe(Widget):
+    """Rotating wireframe globe + twinkling stars + gentle snowfall."""
+
+    _DOT_BITS = {
+        (0, 0): 0x01, (1, 0): 0x02, (2, 0): 0x04, (3, 0): 0x40,
+        (0, 1): 0x08, (1, 1): 0x10, (2, 1): 0x20, (3, 1): 0x80,
+    }
+
+    FPS = 15
+    SPEED_DEG = 32.0
+    TILT_DEG  = 18.0
+
+    INDIA_POLYGON = [
+        (74.0, 35.5), (76.5, 34.5), (78.5, 33.5), (79.5, 31.5),
+        (80.5, 30.0), (82.5, 28.5), (85.0, 27.5), (88.0, 27.0),
+        (89.5, 26.5), (92.0, 28.0), (94.5, 28.5), (96.5, 27.5),
+        (96.0, 26.0), (94.5, 23.5), (93.0, 22.5), (92.5, 21.5),
+        (91.5, 22.8), (90.0, 22.0), (88.0, 21.5), (86.5, 20.0),
+        (84.5, 18.5), (82.0, 16.5), (80.5, 15.5), (80.2, 13.5),
+        (79.5, 10.5), (77.8, 8.3),
+        (76.5, 9.0),  (75.0, 12.0), (74.0, 14.5), (73.0, 17.0),
+        (72.5, 19.5), (72.0, 21.0), (70.0, 21.5), (69.0, 22.5),
+        (68.5, 23.5), (68.0, 24.5), (70.0, 25.5), (70.5, 27.0),
+        (70.0, 29.0), (71.5, 30.5), (72.5, 32.0), (73.5, 33.5),
+        (74.0, 34.5),
+    ]
+    INDIA_BBOX = (8.0, 68.0, 36.0, 97.0)
+
+    PRIMARY_COLOR = "#5a7a9a"
+    ACCENT_COLOR  = "#ffa657"
+
+    # --- particles ------------------------------------------------------
+    PARTICLE_BRIGHT_COLOR = "#eef5ff"    # crisp white
+    PARTICLE_DIM_COLOR    = "#7e94b4"    # faded blue-grey
+
+    # Ratio of fixed (non-falling) twinkling stars.
+    FIXED_RATIO = 0.28
+
+    # Falling snow
+    SNOW_FALL_MIN     = 4.0
+    SNOW_FALL_MAX     = 11.0
+    SNOW_DRIFT_AMP_MIN  = 2.0
+    SNOW_DRIFT_AMP_MAX  = 6.0
+    SNOW_DRIFT_FREQ_MIN = 0.4
+    SNOW_DRIFT_FREQ_MAX = 1.2
+
+    # Twinkle rates (cycles / second)
+    TWINKLE_FIXED_MIN    = 0.25   # stars: slow, obvious pulse
+    TWINKLE_FIXED_MAX    = 0.90
+    TWINKLE_FALLING_MIN  = 0.08   # snow: barely perceptible shimmer
+    TWINKLE_FALLING_MAX  = 0.30
+
+    # Density
+    DENSITY_DIV = 260
+    MAX_PARTICLES = 400
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._t = 0.0
+        self._timer = None
+        self._ct = math.cos(math.radians(self.TILT_DEG))
+        self._st = math.sin(math.radians(self.TILT_DEG))
+        self._primary_style = Style(color=self.PRIMARY_COLOR)
+        self._accent_style  = Style(color=self.ACCENT_COLOR)
+        self._bright_style  = Style(color=self.PARTICLE_BRIGHT_COLOR)
+        self._dim_style     = Style(color=self.PARTICLE_DIM_COLOR)
+        self._particles = []
+
+    def on_mount(self) -> None:
+        if os.environ.get("INDICODE_NO_ANIM") == "1":
+            return
+        self._timer = self.set_interval(1.0 / self.FPS, self._tick)
+
+    def on_unmount(self) -> None:
+        if self._timer:
+            self._timer.stop()
+
+    def pause(self) -> None:
+        if self._timer:
+            self._timer.pause()
+
+    def resume(self) -> None:
+        if self._timer:
+            self._timer.resume()
+
+    def _tick(self) -> None:
+        dt = 1.0 / self.FPS
+        self._t += dt
+        self._ensure_particles()
+        self._update_particles(dt)
+        self.refresh()
+
+    def _globe_geometry(self):
+        w, h = self.size.width, self.size.height
+        px_w, px_h = w * 2, h * 4
+        cx, cy = px_w / 2.0, px_h / 2.0
+        scale = min(px_w, px_h) * 0.32
+        return px_w, px_h, cx, cy, scale
+
+    # --- particles ------------------------------------------------------
+
+    def _ensure_particles(self) -> None:
+        px_w, px_h, _, _, _ = self._globe_geometry()
+        if px_w <= 0 or px_h <= 0:
+            return
+        target = min(self.MAX_PARTICLES,
+                     max(40, (px_w * px_h) // self.DENSITY_DIV))
+        while len(self._particles) < target:
+            self._particles.append(self._new_particle(spawn_anywhere=True))
+
+    def _new_particle(self, spawn_anywhere: bool = False) -> dict:
+        px_w, px_h, _, _, _ = self._globe_geometry()
+        fixed = random.random() < self.FIXED_RATIO
+
+        if fixed:
+            y = random.uniform(0.0, float(px_h))
+            vy = 0.0
+            amp = 0.0
+            drift_freq = 0.0
+            twinkle_lo, twinkle_hi = self.TWINKLE_FIXED_MIN, self.TWINKLE_FIXED_MAX
+        else:
+            if spawn_anywhere:
+                y = random.uniform(-px_h, px_h)
+            else:
+                y = random.uniform(-20.0, 0.0)
+            vy = random.uniform(self.SNOW_FALL_MIN, self.SNOW_FALL_MAX)
+            amp = random.uniform(self.SNOW_DRIFT_AMP_MIN, self.SNOW_DRIFT_AMP_MAX)
+            drift_freq = random.uniform(self.SNOW_DRIFT_FREQ_MIN,
+                                        self.SNOW_DRIFT_FREQ_MAX)
+            twinkle_lo, twinkle_hi = self.TWINKLE_FALLING_MIN, self.TWINKLE_FALLING_MAX
+
+        return {
+            "x": random.uniform(0.0, float(px_w)),
+            "y": y,
+            "vy": vy,
+            "fixed": fixed,
+            "amp": amp,
+            "freq": drift_freq,
+            "phase": random.uniform(0.0, math.tau),
+            "twinkle_freq": random.uniform(twinkle_lo, twinkle_hi),
+            "twinkle_phase": random.uniform(0.0, math.tau),
+        }
+
+    def _update_particles(self, dt: float) -> None:
+        px_w, px_h, _, _, _ = self._globe_geometry()
+        for s in self._particles:
+            s["twinkle_phase"] += s["twinkle_freq"] * math.tau * dt
+            if not s["fixed"]:
+                s["y"] += s["vy"] * dt
+                s["phase"] += s["freq"] * dt
+                if s["y"] > px_h + 2:
+                    s["y"] = random.uniform(-20.0, 0.0)
+                    s["x"] = random.uniform(0.0, float(px_w))
+                    s["vy"] = random.uniform(self.SNOW_FALL_MIN, self.SNOW_FALL_MAX)
+
+    # --- India tests ----------------------------------------------------
+
+    @classmethod
+    def _in_india(cls, lat: float, lon: float) -> bool:
+        lat_min, lon_min, lat_max, lon_max = cls.INDIA_BBOX
+        if not (lat_min <= lat <= lat_max and lon_min <= lon <= lon_max):
+            return False
+        inside = False
+        poly = cls.INDIA_POLYGON
+        n = len(poly)
+        j = n - 1
+        for i in range(n):
+            xi, yi = poly[i]
+            xj, yj = poly[j]
+            if ((yi > lat) != (yj > lat)) and \
+               (lon < (xj - xi) * (lat - yi) / (yj - yi) + xi):
+                inside = not inside
+            j = i
+        return inside
+
+    # --- render ---------------------------------------------------------
+
+    def render(self) -> Text:
+        w, h = self.size.width, self.size.height
+        if w < 20 or h < 6:
+            return Text("")
+
+        px_w, px_h, cx, cy, scale = self._globe_geometry()
+        rot = math.radians(self._t * self.SPEED_DEG)
+        ct, st = self._ct, self._st
+
+        # pixel codes: 0=wireframe, 1=India, 2=dim particle, 3=bright particle
+        pixels: dict = {}
+
+        def put(sx: int, sy: int, code: int) -> None:
+            if 0 <= sx < px_w and 0 <= sy < px_h:
+                key = (sx, sy)
+                if code > pixels.get(key, -1):
+                    pixels[key] = code
+
+        def project(lat_deg: float, lon_deg: float):
+            lat = math.radians(lat_deg)
+            lon = math.radians(lon_deg) + rot
+            cl, sl = math.cos(lat), math.sin(lat)
+            so, co = math.sin(lon), math.cos(lon)
+            x, y, z = cl * so, sl, cl * co
+            y2 = y * ct - z * st
+            z2 = y * st + z * ct
+            if z2 <= 0.0:
+                return None
+            return int(cx + x * scale), int(cy - y2 * scale)
+
+        def plot(lat: float, lon: float, code: int) -> None:
+            pt = project(lat, lon)
+            if pt is not None:
+                put(pt[0], pt[1], code)
+
+        # Latitude rings
+        lon = 0.0
+        while lon < 360.0:
+            for lat in (-60, -40, -20, 0, 20, 40, 60):
+                plot(lat, lon, 1 if self._in_india(lat, lon) else 0)
+            lon += 2.0
+
+        # Longitude meridians
+        lat = -90.0
+        while lat <= 90.0:
+            for lon_v in range(0, 360, 30):
+                plot(lat, lon_v, 1 if self._in_india(lat, lon_v) else 0)
+            lat += 2.0
+
+        # India fill
+        lat = self.INDIA_BBOX[0]
+        while lat <= self.INDIA_BBOX[2]:
+            lon = self.INDIA_BBOX[1]
+            while lon <= self.INDIA_BBOX[3]:
+                if self._in_india(lat, lon):
+                    plot(lat, lon, 1)
+                lon += 0.6
+            lat += 0.6
+
+        # Stars + snow — each with its own twinkle.
+        for s in self._particles:
+            tw = 0.5 + 0.5 * math.sin(s["twinkle_phase"])
+            if s["fixed"]:
+                # Stars: full twinkle, including brief "off" flashes.
+                if tw < 0.30:
+                    continue
+                code = 3 if tw > 0.62 else 2
+                x = int(round(s["x"]))
+                y = int(round(s["y"]))
+            else:
+                # Snow: gentle bright ↔ dim, always visible.
+                code = 3 if tw > 0.55 else 2
+                x = int(round(s["x"] + math.sin(s["phase"]) * s["amp"]))
+                y = int(round(s["y"]))
+            put(x, y, code)
+
+        # Assemble braille cells
+        out = Text()
+        for cell_y in range(h):
+            if cell_y:
+                out.append("\n")
+            base_y = cell_y * 4
+            for cell_x in range(w):
+                bits = 0
+                top_code = -1
+                base_x = cell_x * 2
+                for (dr, dc), bit in self._DOT_BITS.items():
+                    v = pixels.get((base_x + dc, base_y + dr), -1)
+                    if v >= 0:
+                        bits |= bit
+                        if v > top_code:
+                            top_code = v
+                if bits == 0:
+                    out.append(" ")
+                else:
+                    if top_code == 3:
+                        style = self._bright_style
+                    elif top_code == 2:
+                        style = self._dim_style
+                    elif top_code == 1:
+                        style = self._accent_style
+                    else:
+                        style = self._primary_style
+                    out.append(chr(0x2800 + bits), style=style)
+        return out
 
 # Modal screens.
 
@@ -542,6 +832,24 @@ class ChatScreen(ModalScreen):
                         css_class="tool-line",
                     )
 
+                elif t == "rag_provenance":
+                    for item in ev.get("items", []):
+                        filename = item.get("filename", "unknown")
+                        source_file = item.get("source_file", "unknown")
+                        chunk = item.get("chunk_index", "?")
+                        score = item.get("rerank_score")
+                        score_text = (
+                            f" | score {score:.3f}"
+                            if isinstance(score, (int, float))
+                            else ""
+                        )
+                        self._post_safe(
+                            f"[#c586c0]│   ↳ retrieved: {filename}"
+                            f" (chunk {chunk}){score_text}\n"
+                            f"[#858585]│      {source_file}[/]",
+                            css_class="tool-line",
+                        )
+
                 elif t == "approval_required":
                     self._current_reasoning = None
                     decision = self.app.call_from_thread(
@@ -822,17 +1130,19 @@ class IndicodeTUI(App):
     CSS = """
     Screen { background: #000000; }
 
-    #home-stage {
+    /* Globe is the full-screen container. Its own render() (the wireframe)
+       draws first; children mounted inside it draw on top. */
+    #home-globe {
         width: 100%;
         height: 1fr;
         align: center middle;
     }
+
     #home-content {
         width: 76%;
         max-width: 96;
         min-width: 42;
         height: auto;
-        align: center middle;
     }
 
     #logo-text {
@@ -861,9 +1171,7 @@ class IndicodeTUI(App):
         padding: 0 1;
         width: 100%;
     }
-    #home-input:focus {
-        border: solid #62c8ff;
-    }
+    #home-input:focus { border: solid #62c8ff; }
     #home-hints {
         display: none;
         width: 100%;
@@ -882,8 +1190,8 @@ class IndicodeTUI(App):
         margin-top: 1;
     }
     #tip-text {
-        color: #777777;
         dock: bottom;
+        color: #777777;
         height: 2;
         padding: 0 2;
         background: #0b0b0b;
@@ -906,7 +1214,9 @@ class IndicodeTUI(App):
         self.sessions = load_sessions()
 
     def compose(self) -> ComposeResult:
-        with Center(id="home-stage"):
+        # The globe is the parent. Its render() draws the wireframe;
+        # the content we yield inside the with-block draws on top.
+        with RotatingGlobe(id="home-globe"):
             with Vertical(id="home-content"):
                 yield Static(LOGO, id="logo-text")
                 yield Static(SUBTITLE, id="subtitle")
@@ -984,20 +1294,19 @@ class IndicodeTUI(App):
         self._goto_chat(text)
 
     def _goto_chat(self, text: str = "", resume_thread: str = None):
-        """Switch to chat mode with a prompt or an existing thread."""
-        # Hide homepage elements
-        for widget_id in ("home-stage", "tip-text"):
+        try:
+            self.query_one("#home-globe", RotatingGlobe).pause()
+        except Exception:
+            pass
+
+        for widget_id in ("home-globe", "tip-text"):
             try:
-                widget = self.query_one(f"#{widget_id}")
-                widget.display = False
+                self.query_one(f"#{widget_id}").display = False
             except Exception:
                 pass
 
-        # Push ChatScreen
         chat = ChatScreen(self.client, self.sessions)
         self.push_screen(chat)
-
-        # Handle the message after screen is mounted
         self.call_after_refresh(
             lambda: self._start_chat(chat, text, resume_thread)
         )
